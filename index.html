@@ -834,6 +834,9 @@ let cEnd = null;
 
 let pdfPages = { main: [], unpaid: [], comp: [] };
 
+// --- FUNÇÃO AUXILIAR PARA NORMALIZAR TEXTO (Remove acentos e minúsculo) ---
+const norm = s => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+
 const fmt = v => isNaN(v) ? 'R$ 0,00' : new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(v);
 
 const fmtD = d => {
@@ -845,11 +848,20 @@ const fmtD = d => {
 const parseD = s => {
   if (!s) return null;
   if (s instanceof Date) return s;
+  
+  if (typeof s === 'number') {
+    const utcDate = new Date(Date.UTC(1899, 11, 30) + s * 864e5);
+    return new Date(utcDate.getUTCFullYear(), utcDate.getUTCMonth(), utcDate.getUTCDate());
+  }
+  
   if (typeof s === 'string') {
+    const parts = s.split('-');
+    if (parts.length === 3) {
+         return new Date(parts[0], parts[1]-1, parts[2]);
+    }
     let d = new Date(s.split(' ')[0]);
     if (!isNaN(d)) return d;
   }
-  if (typeof s === 'number') return new Date(Date.UTC(1899, 11, 30) + s * 864e5);
   return null;
 };
 
@@ -859,12 +871,22 @@ const parseN = v => {
   return parseFloat(String(v).replace(/[^\d,.\-]/g, '').replace(/\./g, '').replace(',', '.')) || 0;
 };
 
+const normalizeDate = (d) => {
+    if (!d) return null;
+    const nd = new Date(d);
+    nd.setHours(0, 0, 0, 0);
+    return nd.getTime();
+};
+
 const inRange = (d, s, e) => {
   if (!d) return false;
-  const dt = new Date(d);
-  if (s && e) return dt >= s && dt <= e;
-  if (s) return dt >= s;
-  if (e) return dt <= e;
+  const target = normalizeDate(d);
+  const start = normalizeDate(s);
+  const end = normalizeDate(e);
+
+  if (start && end) return target >= start && target <= end;
+  if (start) return target >= start;
+  if (end) return target <= end;
   return true;
 };
 
@@ -1116,10 +1138,12 @@ function render(fc) {
   document.getElementById('cFound').textContent = n;
 }
 
+// --- FUNÇÃO DE EXIBIÇÃO DE CLIENTES (Atualizada para busca parcial e sem acento) ---
 function showCliCbs(filterQuery = '') {
-  const filtered = filterQuery.length < 2 
+  const q = norm(filterQuery);
+  const filtered = q.length < 2 
     ? allCli 
-    : allCli.filter(c => c.toLowerCase().startsWith(filterQuery.toLowerCase()));
+    : allCli.filter(c => norm(c).includes(q));
   
   document.getElementById('cliList').innerHTML = filtered.map(c =>
     `<label><input type="checkbox" value="${c}" ${selCli.has(c) ? 'checked' : ''}>${c}</label>`
@@ -1140,10 +1164,12 @@ function showCliCbs(filterQuery = '') {
   });
 }
 
+// --- FUNÇÃO DE EXIBIÇÃO DE VENDEDORES (Atualizada para busca parcial e sem acento) ---
 function showVendCbs(filterQuery = '') {
-  const filtered = filterQuery.length < 2 
+  const q = norm(filterQuery);
+  const filtered = q.length < 2 
     ? allVend 
-    : allVend.filter(v => v.toLowerCase().startsWith(filterQuery.toLowerCase()));
+    : allVend.filter(v => norm(v).includes(q));
   
   document.getElementById('vendList').innerHTML = filtered.map(v =>
     `<label><input type="checkbox" value="${v}" ${selVend.has(v) ? 'checked' : ''}>${v}</label>`
@@ -1191,7 +1217,11 @@ function updateU() {
     return;
   }
 
-  ut.sort((a, b) => (parseD(a.venc) || 0) - (parseD(b.venc) || 0));
+  ut.sort((a, b) => {
+    const dA = parseD(a.venc);
+    const dB = parseD(b.venc);
+    return (dA ? dA.getTime() : 0) - (dB ? dB.getTime() : 0);
+  });
 
   const byE = {};
   ut.forEach(t => {
@@ -1276,6 +1306,12 @@ function updateC() {
 
   if (selComp.size) ct = ct.filter(t => selComp.has(t.emp));
 
+  ct.sort((a, b) => {
+    const dA = parseD(a.venc);
+    const dB = parseD(b.venc);
+    return (dA ? dA.getTime() : 0) - (dB ? dB.getTime() : 0);
+  });
+
   const byE = {};
   ct.forEach(t => {
     if (!byE[t.emp]) byE[t.emp] = { n: 0, tot: 0, cls: new Set() };
@@ -1288,8 +1324,6 @@ function updateC() {
     `<div class="sum-card"><b>${e}</b><br>Faturas: ${d.n} | Clientes: ${d.cls.size}<br>Total: ${fmt(d.tot)}</div>`
   ).join('');
   cs.style.display = 'block';
-
-  ct.sort((a, b) => (a.emp || '').localeCompare(b.emp || ''));
 
   cr.innerHTML = `<div class="tbl-wrap"><table class="u-tbl">
     <tr>
@@ -1342,14 +1376,12 @@ async function genPDF(type) {
   let currentPage = createPageDiv(contentW);
   document.body.appendChild(currentPage);
 
-  // Adicionar título
   const title = document.createElement('h2');
   title.textContent = type === 'main' ? 'Relatório de Títulos' : type === 'unpaid' ? 'Faturas Não Liquidadas' : 'Inadimplência por Empresa';
   title.style.textAlign = 'center';
   title.style.marginBottom = '10px';
   currentPage.appendChild(title);
 
-  // Adicionar data de geração
   const dt = document.createElement('p');
   dt.textContent = 'Gerado em: ' + new Date().toLocaleString('pt-BR');
   dt.style.textAlign = 'center';
@@ -1358,7 +1390,6 @@ async function genPDF(type) {
   dt.style.fontSize = '12px';
   currentPage.appendChild(dt);
 
-  // Adicionar resumo se existir
   const sumEl = document.getElementById(sumId);
   if (sumEl && sumEl.style.display !== 'none') {
     const sumClone = sumEl.cloneNode(true);
@@ -1756,7 +1787,7 @@ document.querySelectorAll('.modal').forEach(m => {
 });
 
 document.getElementById('searchIn').oninput = function() {
-  const q = this.value.toLowerCase();
+  const q = this.value;
   if (q.length < 2) {
     selCli.clear();
     document.getElementById('cliCbs').style.display = 'none';
@@ -1764,13 +1795,13 @@ document.getElementById('searchIn').oninput = function() {
     return;
   }
 
-  selCli = new Set(allCli.filter(c => c.toLowerCase().startsWith(q)));
+  // A filtragem agora acontece dentro de showCliCbs usando a função norm()
   showCliCbs(q);
   update();
 };
 
 document.getElementById('vendorIn').oninput = function() {
-  const q = this.value.toLowerCase();
+  const q = this.value;
   if (q.length < 2) {
     selVend.clear();
     document.getElementById('vendCbs').style.display = 'none';
@@ -1778,7 +1809,7 @@ document.getElementById('vendorIn').oninput = function() {
     return;
   }
 
-  selVend = new Set(allVend.filter(v => v.toLowerCase().startsWith(q)));
+  // A filtragem agora acontece dentro de showVendCbs usando a função norm()
   showVendCbs(q);
   update();
 };
